@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  WorkshopName:
+    Type: String
+
+  ParentZone:
+    Type: String
+    Default: aws.seibtribe.com
+
+Resources:
+  WildACM:
+    Type: "AWS::CertificateManager::Certificate"
+    Properties:
+      DomainName: !Join [".", ["*", Ref: WorkshopName, Ref: ParentZone]]
+      SubjectAlternativeNames:
+        - !Join [".", [Ref: WorkshopName, Ref: ParentZone]]
+      Tags:
+        - Key: Workshop
+          Value: !Ref WorkshopName
+
+  WorkshopDNSZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: !Join ["", ["Hosted zone for ", !Ref "WorkshopName"]]
+      Name: !Join [".", [Ref: WorkshopName, Ref: ParentZone]]
+      HostedZoneTags:
+        - Key: Workshop
+          Value: !Ref WorkshopName
+
+  CDNDNS:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Join ["", [cdn, ".", Ref: WorkshopName, ".", Ref: ParentZone, "."]]
+      HostedZoneName: !Join ["", [Ref: WorkshopName, ".", Ref: ParentZone, "."]]
+      Type: A
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt [WebsiteCloudfront, DomainName]
+
+  ApexDNS:
+    Type: AWS::Route53::RecordSetGroup
+    DependsOn:
+      - CDNDNS
+    Properties:
+      HostedZoneName: !Join ["", [Ref: WorkshopName, ".", Ref: ParentZone, "."]]
+      RecordSets:
+        - Name: !Join ["", [Ref: WorkshopName, ".", Ref: ParentZone, "."]]
+          Type: A
+          AliasTarget:
+            HostedZoneId: !Ref WorkshopDNSZone
+            DNSName:
+              !Join [
+                "",
+                [cdn, ".", Ref: WorkshopName, ".", Ref: ParentZone, "."],
+              ]
+
+  CloudFrontOriginIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Join ["", ["origin identity for", Ref: WorkshopName]]
+
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+  WebsitePolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: WebsiteBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              CanonicalUser:
+                Fn::GetAtt: [CloudFrontOriginIdentity, S3CanonicalUserId]
+            Action: "s3:GetObject"
+            Resource: !Sub "${WebsiteBucket.Arn}/*"
+
+  WebsiteCloudfront:
+    Type: AWS::CloudFront::Distribution
+    DependsOn:
+      - WebsiteBucket
+    Properties:
+      DistributionConfig:
+        Comment: Cloudfront Distribution pointing to S3 bucket
+        Origins:
+          - DomainName: !Sub "${WebsiteBucket}.s3.amazonaws.com"
+            Id: webpage
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${CloudFrontOriginIdentity}"
+        Enabled: true
+        HttpVersion: "http2"
+        DefaultRootObject: index.html
+        Aliases:
+          - !Join [".", [cdn, Ref: WorkshopName, Ref: ParentZone]]
+          - !Join [".", [Ref: WorkshopName, Ref: ParentZone]]
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          DefaultTTL: 60
+          TargetOriginId: webpage
+          ForwardedValues:
+            QueryString: true
+            Cookies:
+              Forward: none
+          ViewerProtocolPolicy: redirect-to-https
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          AcmCertificateArn: !Ref WildACM
+          SslSupportMethod: sni-only
